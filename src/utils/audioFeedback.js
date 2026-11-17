@@ -37,7 +37,7 @@ function playTone(frequency, durationMs, startDelayMs = 0, type = 'sine') {
 
 /**
  * צפצוף לפי סוג אירוע. כל סוג נשמע שונה כדי שאפשר לעבוד בלי להסתכל על המסך.
- * @param {'ok'|'fail'|'notFound'|'new'|'ask'|'error'|'undo'} kind
+ * @param {'ok'|'fail'|'context'|'dup'|'notFound'|'new'|'ask'|'error'|'undo'} kind
  */
 export function beep(kind) {
   switch (kind) {
@@ -51,6 +51,17 @@ export function beep(kind) {
     case 'notFound':
       playTone(520, 150);
       playTone(390, 150, 180);
+      break;
+    case 'context':
+      // מעבר מיקום / סוג: שלושה צלילים עולים
+      playTone(523, 90);
+      playTone(659, 90, 100);
+      playTone(784, 160, 200);
+      break;
+    case 'dup':
+      // מספר שכבר נאמר: שני צלילים זהים קצרים
+      playTone(700, 70);
+      playTone(700, 70, 110);
       break;
     case 'new':
       playTone(660, 90);

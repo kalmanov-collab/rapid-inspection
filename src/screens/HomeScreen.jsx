@@ -24,16 +24,16 @@ export default function HomeScreen({ saved, onFile, onResume, onExport, onDiscar
         {saved && (
           <section className="bg-gray-800 rounded-2xl p-4 border border-emerald-700">
             <div className="text-xs text-emerald-300 mb-1">סשן שמור במכשיר</div>
-            <div className="text-lg font-bold">{saved.meta.clientName ? `${saved.meta.clientName} · ` : ''}{saved.meta.site}</div>
+            <div className="text-lg font-bold">{saved.state.clientName ? `${saved.state.clientName} · ` : ''}{saved.state.site}</div>
             <div className="text-sm text-gray-400">{saved.meta.fileName} · {saved.meta.date}</div>
             {counts && (
               <div className="mt-2 text-sm text-gray-300">
-                נבדקו {counts.inspected} מתוך {counts.total} · פסולים {counts.fail} · חדשים {counts.new} · נותרו {counts.pending}
+                נרשמו {counts.total} פריטים · פסולים {counts.fail} · {counts.types} סוגים
               </div>
             )}
             <div className="mt-3 grid grid-cols-3 gap-2">
               <button onClick={onResume} className="bg-emerald-600 rounded-xl py-3 font-bold flex items-center justify-center gap-1"><Play size={18} /> המשך</button>
-              <button onClick={onExport} disabled={!saved.state} className="bg-blue-600 disabled:bg-gray-600 rounded-xl py-3 font-bold flex items-center justify-center gap-1"><Download size={18} /> ייצוא</button>
+              <button onClick={onExport} disabled={!saved.state} className="bg-blue-600 disabled:bg-gray-600 rounded-xl py-3 font-bold flex items-center justify-center gap-1"><Download size={18} /> סיכום</button>
               <button onClick={() => { if (window.confirm('למחוק את הסשן השמור? נתונים שלא יוצאו יאבדו.')) onDiscard(); }} className="bg-gray-700 rounded-xl py-3 font-bold flex items-center justify-center gap-1"><Trash2 size={18} /> מחק</button>
             </div>
           </section>
@@ -49,7 +49,7 @@ export default function HomeScreen({ saved, onFile, onResume, onExport, onDiscar
 
         <section className="text-xs text-gray-500 leading-relaxed px-1">
           <div>דרוש Chrome באנדרואיד עם הרשאת מיקרופון. זיהוי הדיבור דורש רשת; הנתונים נשמרים במכשיר גם ללא רשת.</div>
-          <div>בסיום: "ייצוא" מוריד את קובץ הריכוז המעודכן, גיליון "נבדקו" ו-JSON לתסקירים.</div>
+          <div>בשטח: "מיקום ...", "סוג ...", ואז רק מספרים. ההשוואה לרשימה הקודמת (ישן / חדש) נעשית במסך הסיכום, ומשם הייצוא.</div>
         </section>
       </main>
     </div>
@@ -57,12 +57,5 @@ export default function HomeScreen({ saved, onFile, onResume, onExport, onDiscar
 }
 
 function countState(state) {
-  const counts = { total: state.order.length, pending: 0, ok: 0, fail: 0, notFound: 0, new: 0 };
-  for (const id of state.order) {
-    const item = state.items[id];
-    counts[item.status]++;
-    if (item.isNew) counts.new++;
-  }
-  counts.inspected = counts.ok + counts.fail + counts.notFound;
-  return counts;
+  return { total: state.entries.length, fail: state.entries.filter((e) => e.status === 'fail').length, types: state.types.length };
 }

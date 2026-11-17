@@ -5,7 +5,7 @@ import { ArrowRight, MapPin } from 'lucide-react';
  * בחירת אתר מתוך קובץ הריכוז ושם הלקוח לתסקיר.
  */
 export default function SiteScreen({ parsed, meta, onStart, onBack, error }) {
-  const [clientName, setClientName] = useState(meta?.clientName || 'חברת החשמל');
+  const [clientName, setClientName] = useState('חברת החשמל');
   const [site, setSite] = useState(parsed.sites[0] || '');
 
   const siteStats = useMemo(() => {

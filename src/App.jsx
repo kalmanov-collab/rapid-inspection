@@ -1,26 +1,24 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import HomeScreen from './screens/HomeScreen';
 import SiteScreen from './screens/SiteScreen';
-import ExportScreen from './screens/ExportScreen';
-import CatalogScreen from './screens/CatalogScreen';
-import RapidInspectionScreen from './components/RapidInspectionScreen';
-import { parseSummaryWorkbook, buildSession, todayString } from './services/excelService';
+import ReviewScreen from './screens/ReviewScreen';
+import FieldInspectionScreen from './components/FieldInspectionScreen';
+import { parseSummaryWorkbook, todayString } from './services/excelService';
 import { loadSaved, saveParsed, saveMeta, saveState, clearSaved } from './services/sessionStore';
-import { createInitialState } from './utils/rapidInspectionEngine';
+import { createFieldState } from './utils/fieldSession';
+import { buildTypeCatalog } from './utils/typeCatalog';
 
 /**
- * אפליקציה עצמאית: קובץ ריכוז -> בחירת אתר -> בדיקה קולית -> ייצוא (ריכוז מעודכן / נבדקו / JSON).
+ * אפליקציה עצמאית: קובץ ריכוז -> בחירת אתר -> בדיקה קולית בשטח -> סיכום והשוואה -> ייצוא.
  * הכל נשמר במכשיר; אין שרת.
  */
 export default function App() {
   const [screen, setScreen] = useState('loading');
   const [parsed, setParsed] = useState(null);
-  const [meta, setMeta] = useState(null);           // { clientName, site, date, fileName, startedAt }
-  const [session, setSession] = useState(null);     // { clientName, siteName, catalog, locations, items }
-  const [state, setState] = useState(null);         // מצב המנוע (נשמר אחרי כל שינוי)
+  const [meta, setMeta] = useState(null);     // { fileName, date, startedAt }
+  const [state, setState] = useState(null);   // מצב הבדיקה (fieldSession)
   const [error, setError] = useState('');
 
-  // טעינת סשן שמור בהפעלה
   useEffect(() => {
     loadSaved()
       .then((saved) => {
@@ -29,52 +27,44 @@ export default function App() {
           setMeta(saved.meta);
           setState(saved.state);
         }
-        setScreen('home');
       })
-      .catch((err) => {
-        console.error('Failed to load saved session:', err);
-        setScreen('home');
-      });
+      .catch((err) => console.error('Failed to load saved session:', err))
+      .finally(() => setScreen('home'));
   }, []);
 
   const handleFile = useCallback(async (file) => {
     setError('');
     try {
-      const data = await file.arrayBuffer();
-      const nextParsed = parseSummaryWorkbook(data);
+      const nextParsed = parseSummaryWorkbook(await file.arrayBuffer());
       setParsed(nextParsed);
-      setMeta({ fileName: file.name, clientName: meta?.clientName || '', site: null, date: todayString(), startedAt: Date.now() });
+      setMeta({ fileName: file.name, date: todayString(), startedAt: Date.now() });
       setState(null);
       setScreen('site');
     } catch (err) {
       console.error(err);
       setError(`לא ניתן לקרוא את הקובץ: ${err.message}`);
     }
-  }, [meta]);
+  }, []);
 
   const startSession = useCallback(async (site, clientName) => {
     try {
-      const nextSession = buildSession(parsed, site, { clientName });
-      const nextMeta = { ...meta, site, clientName, date: todayString(), startedAt: Date.now() };
-      const nextState = createInitialState(nextSession);
-      setSession(nextSession);
+      const nextMeta = { ...meta, date: todayString(), startedAt: Date.now() };
+      const nextState = createFieldState({
+        site,
+        clientName,
+        knownLocations: parsed.locationsBySite[site] || [],
+        catalog: buildTypeCatalog(parsed, site),
+        typeMemory: parsed.typeMemory,
+      });
       setMeta(nextMeta);
       setState(nextState);
       await Promise.all([saveParsed(parsed), saveMeta(nextMeta), saveState(nextState)]);
-      setScreen('inspect');
+      setScreen('field');
     } catch (err) {
       console.error(err);
       setError(err.message);
     }
   }, [parsed, meta]);
-
-  const resumeSession = useCallback(() => {
-    if (!parsed || !meta?.site) return;
-    const nextSession = session || buildSession(parsed, meta.site, { clientName: meta.clientName });
-    if (!session) setSession(nextSession);
-    if (!state) setState(createInitialState(nextSession));
-    setScreen('inspect');
-  }, [parsed, meta, session, state]);
 
   const handleStateChange = useCallback((nextState) => {
     setState(nextState);
@@ -85,45 +75,27 @@ export default function App() {
     await clearSaved();
     setParsed(null);
     setMeta(null);
-    setSession(null);
     setState(null);
     setScreen('home');
   }, []);
 
   if (screen === 'loading') return <div className="min-h-full flex items-center justify-center text-gray-400">טוען...</div>;
 
-  if (screen === 'site') {
+  if (screen === 'site' && parsed) {
     return <SiteScreen parsed={parsed} meta={meta} onStart={startSession} onBack={() => setScreen('home')} error={error} />;
   }
-
-  if (screen === 'inspect' && session) {
-    return (
-      <RapidInspectionScreen
-        key={`${meta.site}-${meta.startedAt}`}
-        session={session}
-        initialState={state || undefined}
-        onStateChange={handleStateChange}
-        onFinish={() => setScreen('export')}
-        onClose={() => setScreen('home')}
-        onOpenCatalog={() => setScreen('catalog')}
-      />
-    );
+  if (screen === 'field' && state) {
+    return <FieldInspectionScreen state={state} onChange={handleStateChange} onReview={() => setScreen('review')} onClose={() => setScreen('home')} />;
   }
-
-  if (screen === 'catalog' && state) {
-    return <CatalogScreen state={state} onChange={handleStateChange} onBack={() => setScreen('inspect')} />;
+  if (screen === 'review' && state && parsed) {
+    return <ReviewScreen parsed={parsed} state={state} meta={meta} onChange={handleStateChange} onBack={() => setScreen('field')} onFinish={finishSession} />;
   }
-
-  if (screen === 'export' && state) {
-    return <ExportScreen parsed={parsed} state={state} meta={meta} onBack={() => setScreen('inspect')} onFinish={finishSession} />;
-  }
-
   return (
     <HomeScreen
-      saved={parsed && meta?.site ? { meta, state } : null}
+      saved={parsed && state ? { meta, state } : null}
       onFile={handleFile}
-      onResume={resumeSession}
-      onExport={() => setScreen('export')}
+      onResume={() => setScreen('field')}
+      onExport={() => setScreen('review')}
       onDiscard={finishSession}
       error={error}
     />

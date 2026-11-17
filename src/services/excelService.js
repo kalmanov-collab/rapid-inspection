@@ -1,23 +1,24 @@
 /**
- * שירות אקסל: קריאת קובץ הריכוז, בניית סשן לאתר, ועדכון הקובץ בתוצאות הבדיקה.
+ * שירות אקסל: קריאת קובץ הריכוז ועדכונו בתוצאות הבדיקה (גרסה 3).
  *
- * הקובץ הנתמך הוא "ריכוז מתקנים ואביזרים" (גיליון עם העמודות: אתר, סוג מתקן / אביזר, תיאור (כפי שבתסקיר),
+ * הקובץ הנתמך הוא "ריכוז מתקנים ואביזרים" (עמודות: אתר, סוג מתקן / אביזר, תיאור (כפי שבתסקיר),
  * מס' סידורי / פנימי, תאריך בדיקה אחרונה, ממצא בבדיקה, קבוצה / מחזיק, מס' תסקיר ...).
- * הזיהוי לפי כותרות, כך שסדר העמודות לא משנה ועמודות נוספות נשמרות.
+ * העמודות מזוהות לפי הכותרת; עמודות אחרות נשמרות כמו שהן.
  *
- * גיליון אופציונלי "קטלוג" (תיאור, עומס, כינויים) מאפשר לקבוע כינויים קוליים ועומס לכל תיאור;
- * הגיליון נכתב בייצוא כדי שאפשר יהיה לערוך אותו באקסל ולטעון שוב.
+ * הייצוא כותב: את גיליון הריכוז המעודכן (מיקום מתעדכן לאחרון, שורות לפריטים חדשים, עמודות הבדיקה הנוכחית),
+ * "נבדקו <תאריך>", "לא נבדקו", "סוגים" (תיאור לתסקיר ועומס לכל סוג שנאמר - נקרא בפעם הבאה), "מיקומים".
  *
- * הקובץ עובד גם ב-node (בדיקות) וגם בדפדפן.
+ * עובד גם ב-node (בדיקות) וגם בדפדפן.
  */
 import * as XLSX from 'xlsx';
+import { nameKey } from '../utils/fieldParser.js';
 
-/** מפתחות פנימיים -> כותרות אפשריות בקובץ (התאמה לפי הכלה, ללא תלות בגרשיים) */
+/** מפתחות פנימיים -> כותרות אפשריות בקובץ */
 const COLUMN_ALIASES = {
   site: ['אתר'],
   reportNumber: ['מס תסקיר', "מס' תסקיר", 'מספר תסקיר'],
-  type: ['סוג מתקן', 'סוג אביזר', 'סוג'],
-  description: ['תיאור'],
+  type: ['סוג מתקן', 'סוג אביזר'],
+  description: ['תיאור (כפי שבתסקיר)', 'תיאור'],
   serial: ['מס סידורי', "מס' סידורי", 'מספר סידורי', 'סידורי'],
   lastInspection: ['תאריך בדיקה אחרונה', 'בדיקה אחרונה'],
   prevResult: ['ממצא בבדיקה', 'ממצא'],
@@ -32,13 +33,21 @@ export const RESULT_COLUMNS = {
   currentDefects: 'ליקויים / הערה נוכחית',
   currentLocation: 'מיקום נוכחי',
   previousLocation: 'מיקום קודם (אם הועבר)',
+  spokenType: 'סוג כפי שנאמר',
   swl: 'עומס עבודה (טון)',
   isNew: 'פריט חדש',
+  review: 'לבדיקה',
   confidence: 'ביטחון זיהוי',
 };
 
-const CATALOG_SHEET = 'קטלוג';
-const STATUS_TEXT = { ok: 'תקין', fail: 'פסול', notFound: 'לא נמצא', pending: '' };
+/** גיליונות שהאפליקציה כותבת מחדש בכל ייצוא (לא מועתקים מהקובץ הקודם) */
+const TYPES_SHEET = 'סוגים';
+const LOCATIONS_SHEET = 'מיקומים';
+const NOT_INSPECTED_SHEET = 'לא נבדקו';
+const GENERATED_SHEETS = new Set([TYPES_SHEET, LOCATIONS_SHEET, NOT_INSPECTED_SHEET, 'קטלוג']);
+
+const STATUS_TEXT = { ok: 'תקין', fail: 'פסול' };
+const RESULT_HEADERS = new Set(Object.values(RESULT_COLUMNS));
 
 // ---------- עזרים ----------
 
@@ -47,14 +56,15 @@ function normalizeHeader(value) {
 }
 
 function findColumn(headers, candidates) {
-  const normalized = headers.map(normalizeHeader);
+  const usable = headers.filter((h) => !RESULT_HEADERS.has(h));
+  const normalized = usable.map(normalizeHeader);
   for (const candidate of candidates) {
     const exact = normalized.findIndex((h) => h === normalizeHeader(candidate));
-    if (exact !== -1) return headers[exact];
+    if (exact !== -1) return usable[exact];
   }
   for (const candidate of candidates) {
     const partial = normalized.findIndex((h) => h.includes(normalizeHeader(candidate)));
-    if (partial !== -1) return headers[partial];
+    if (partial !== -1) return usable[partial];
   }
   return null;
 }
@@ -62,7 +72,10 @@ function findColumn(headers, candidates) {
 /** תאריך מאקסל / מחרוזת -> DD/MM/YYYY */
 export function formatDate(value) {
   if (!value) return '';
-  if (value instanceof Date) return `${String(value.getDate()).padStart(2, '0')}/${String(value.getMonth() + 1).padStart(2, '0')}/${value.getFullYear()}`;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return '';
+    return `${String(value.getDate()).padStart(2, '0')}/${String(value.getMonth() + 1).padStart(2, '0')}/${value.getFullYear()}`;
+  }
   if (typeof value === 'number') {
     const parsed = XLSX.SSF.parse_date_code(value);
     if (parsed) return `${String(parsed.d).padStart(2, '0')}/${String(parsed.m).padStart(2, '0')}/${parsed.y}`;
@@ -74,7 +87,7 @@ export function todayString(date = new Date()) {
   return formatDate(date);
 }
 
-/** עומס עבודה מתוך תיאור ("6.5 טון", "3.2TON", "4250KG") */
+/** עומס עבודה מתוך תיאור ("6.5 טון", "3.2TON", "4250KG"); '' אם אין */
 export function swlFromDescription(description) {
   const text = String(description || '');
   let m = text.match(/(\d+(?:\.\d+)?)\s*(?:TON|טון)/i);
@@ -84,77 +97,9 @@ export function swlFromDescription(description) {
   return '';
 }
 
-const ALIAS_STOP_WORDS = new Set(['הרמה', 'במבנה', 'גודל', 'אורך', 'מפולייאסטר', 'בקצוות', 'לולאות']);
-
-const FRACTION_WORDS = {
-  '1/4': 'רבע', '5/16': 'חמש שש עשרה', '3/8': 'שלוש שמיניות', '1/2': 'חצי', '5/8': 'חמש שמיניות', '3/4': 'שלושה רבעים',
-  '7/8': 'שבע שמיניות', '1': 'אינץ', '1-1/8': 'אינץ ושמינית', '1-1/4': 'אינץ ורבע', '1-3/8': 'אינץ ושלוש שמיניות',
-  '1-1/2': 'אינץ וחצי', '1-3/4': 'אינץ ושלושה רבעים', '2': 'שני אינץ', '2-1/2': 'שני אינץ וחצי',
-};
-
-/**
- * כינויים קוליים ברירת מחדל מתוך תיאור הפריט - מה שנוח לומר בשטח.
- * המשתמש יכול לערוך אותם בגיליון "קטלוג".
- */
-export function defaultAliases(type, description) {
-  const text = String(description || '');
-  const aliases = new Set();
-  const length = text.match(/אורך\s*(\d+(?:\.\d+)?)\s*מ/);
-  const lengthWords = length ? `${length[1]} מטר` : '';
-
-  if (/רצוע|חגור|עניב/.test(text)) {
-    const shape = /שטוח/.test(text) ? 'שטוחה' : /עגול/.test(text) ? 'עגולה' : '';
-    if (lengthWords) {
-      aliases.add(`רצועה ${shape} ${lengthWords}`.replace(/\s+/g, ' '));
-      aliases.add(`רצועה ${lengthWords}`);
-    }
-  } else if (/שאקל|שקל/.test(text)) {
-    const size = text.match(/(\d(?:-\d\/\d+)?(?:\/\d+)?)\s*"?/g)?.map((s) => s.trim().replace(/"/g, '')).find((s) => FRACTION_WORDS[s]);
-    if (size) {
-      aliases.add(`שאקל ${FRACTION_WORDS[size]}`);
-      aliases.add(`שאקל ${size.replace('-', ' ו')}`);
-    }
-  } else if (/מענב|שרשרת/.test(text)) {
-    const legs = text.match(/(\d)\s*ענפ/) ? text.match(/(\d)\s*ענפ/)[1] : /חד[\s-]?ענפ/.test(text) ? '1' : '';
-    const legWords = legs === '1' ? 'ענף אחד' : legs ? `${legs} ענפים` : '';
-    aliases.add(`מענב ${legWords} ${lengthWords}`.replace(/\s+/g, ' ').trim());
-    if (/כבל/.test(text)) aliases.add(`מענב כבל ${lengthWords}`.trim());
-  } else if (/מחגר|גלגלת/.test(text)) {
-    const tons = text.match(/(\d+(?:\.\d+)?)\s*(?:טון|TON)/i);
-    const kind = /מחגר/.test(text) ? 'מחגר' : 'גלגלת';
-    if (tons) aliases.add(`${kind} ${tons[1]} טון`);
-  }
-
-  // תמיד: התיאור עצמו בלי מילות מילוי, כגיבוי
-  const cleaned = text
-    .replace(/[\u03A9\u03C9\u2126"״׳']/g, ' ')
-    .replace(/(\d+(?:\.\d+)?)\s*מ(?=\s|$)/g, '$1 מטר')
-    .split(/\s+/)
-    .filter((word) => word && !ALIAS_STOP_WORDS.has(word))
-    .join(' ');
-  if (cleaned) aliases.add(cleaned);
-  return [...aliases].filter(Boolean);
-}
-
-/**
- * מפתח קנוני לתיאור - מאחד ניסוחים שונים של אותו אביזר מתסקירים שונים
- * ("שאקל במבנה Ωגודל "7/8", "שאקל הרמה במבנה Ωגודל "7/8", "שקל הרמה במבנה Ω,עומס: 6.5 טון,גודל:"7/8").
- */
-const CANONICAL_STOP_WORDS = new Set(['הרמה', 'במבנה', 'גודל', 'מפולייאסטר', 'עם']);
-
-export function canonicalKey(description) {
-  return String(description || '')
-    .replace(/שקל/g, 'שאקל')
-    .replace(/עומס:?\s*[\d.]+\s*(?:טון|TON)/gi, ' ')
-    .replace(/[\u03A9\u03C9\u2126"״׳',:()]/g, ' ')   // אומגה בשני קידודים (Ω / Ω), גרשיים ופיסוק
-    .replace(/(\d+(?:\.\d+)?)\s+מ(?=\s|$)/g, '$1מ')
-    .split(/\s+/)
-    .filter((word) => word && !CANONICAL_STOP_WORDS.has(word))
-    .join(' ');
-}
-
-function slug(text) {
-  return String(text).replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 60);
+function sheetWithRtl(sheet) {
+  sheet['!views'] = [{ RTL: true }];
+  return sheet;
 }
 
 // ---------- קריאה ----------
@@ -162,21 +107,19 @@ function slug(text) {
 /**
  * קריאת קובץ הריכוז.
  * @param {ArrayBuffer|Uint8Array|Buffer} data
- * @returns {{sheetName, headers, columns, rows, sites, catalogOverrides, otherSheets}}
+ * @returns {{sheetName, headers, columns, rows, sites, locationsBySite, typeMemory, typesSheetRows, otherSheets}}
  */
 export function parseSummaryWorkbook(data) {
   const workbook = XLSX.read(data, { type: data instanceof ArrayBuffer ? 'array' : 'buffer', cellDates: true });
 
-  // הגיליון הראשון שמכיל עמודת מס' סידורי
   let sheetName = null;
   let headers = [];
   for (const name of workbook.SheetNames) {
-    const sheet = workbook.Sheets[name];
-    const firstRows = XLSX.utils.sheet_to_json(sheet, { header: 1, range: 0, blankrows: false, defval: '' }).slice(0, 5);
-    const headerRowIndex = firstRows.findIndex((row) => findColumn(row.map(String), COLUMN_ALIASES.serial));
-    if (headerRowIndex !== -1) {
+    const firstRows = XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, blankrows: false, defval: '' }).slice(0, 5);
+    const headerRow = firstRows.find((row) => findColumn(row.map(String), COLUMN_ALIASES.serial));
+    if (headerRow) {
       sheetName = name;
-      headers = firstRows[headerRowIndex].map(String);
+      headers = headerRow.map(String);
       break;
     }
   }
@@ -185,262 +128,231 @@ export function parseSummaryWorkbook(data) {
   const columns = Object.fromEntries(Object.entries(COLUMN_ALIASES).map(([key, names]) => [key, findColumn(headers, names)]));
   if (!columns.serial || !columns.description) throw new Error('חסרות עמודות חובה: מס\' סידורי / תיאור');
 
-  const rawRows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: '' });
-  const rows = rawRows.filter((row) => String(row[columns.serial] ?? '').trim() !== '');
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: '' })
+    .filter((row) => String(row[columns.serial] ?? '').trim() !== '');
 
   const sites = [...new Set(rows.map((row) => String(columns.site ? row[columns.site] : '').trim()))].filter(Boolean);
 
-  // גיליון קטלוג אופציונלי: תיאור -> { swl, aliases }
-  const catalogOverrides = {};
-  if (workbook.Sheets[CATALOG_SHEET]) {
-    for (const row of XLSX.utils.sheet_to_json(workbook.Sheets[CATALOG_SHEET], { defval: '' })) {
-      const description = String(row['תיאור'] ?? '').trim();
-      if (!description) continue;
-      const aliases = String(row['כינויים קוליים'] ?? row['כינויים'] ?? '').split('|').map((s) => s.trim()).filter(Boolean);
-      const swl = row['עומס (טון)'] ?? row['עומס'] ?? '';
-      catalogOverrides[description] = { aliases, swl: swl === '' ? '' : Number(swl) };
+  const locationsBySite = {};
+  if (columns.location) {
+    for (const row of rows) {
+      const site = columns.site ? String(row[columns.site]).trim() : '';
+      const location = String(row[columns.location] ?? '').trim();
+      if (!location) continue;
+      (locationsBySite[site] ||= new Set()).add(location);
+    }
+  }
+  for (const site of Object.keys(locationsBySite)) locationsBySite[site] = [...locationsBySite[site]];
+
+  // זיכרון סוגים מייצוא קודם: שם שנאמר -> תיאור לתסקיר ועומס
+  const typeMemory = {};
+  const typesSheetRows = [];
+  if (workbook.Sheets[TYPES_SHEET]) {
+    for (const row of XLSX.utils.sheet_to_json(workbook.Sheets[TYPES_SHEET], { defval: '' })) {
+      const spoken = String(row['סוג כפי שנאמר'] ?? '').trim();
+      if (!spoken) continue;
+      const swl = row['עומס (טון)'];
+      typesSheetRows.push({ key: nameKey(spoken), row: { ...row, 'פריטים היום': '', 'חדשים היום': '' } });
+      typeMemory[nameKey(spoken)] = {
+        reportDescription: String(row['תיאור לתסקיר'] ?? '').trim() || undefined,
+        swl: swl === '' || swl === undefined ? '' : Number(swl),
+      };
     }
   }
 
-  const otherSheets = workbook.SheetNames.filter((name) => name !== sheetName && name !== CATALOG_SHEET).map((name) => ({
-    name,
-    data: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: '' }),
-  }));
+  const otherSheets = workbook.SheetNames
+    .filter((name) => name !== sheetName && !GENERATED_SHEETS.has(name))
+    .map((name) => ({ name, data: XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: '' }) }));
 
-  return { sheetName, headers, columns, rows, sites, catalogOverrides, otherSheets };
-}
-
-/**
- * בניית סשן לאתר מתוך הקובץ: קטלוג (לפי תיאור), מיקומים ופריטים.
- */
-export function buildSession(parsed, site, { clientName = '' } = {}) {
-  const { columns, rows, catalogOverrides } = parsed;
-  const siteRows = columns.site ? rows.filter((row) => String(row[columns.site]).trim() === site) : rows;
-  if (siteRows.length === 0) throw new Error(`אין פריטים לאתר "${site}"`);
-
-  // ניסוחים שונים של אותו אביזר מאוחדים לרשומת קטלוג אחת; התיאור הנפוץ ביותר הוא הקנוני
-  const variantCounts = new Map();
-  for (const row of siteRows) {
-    const description = String(row[columns.description]).trim();
-    if (!description) continue;
-    const key = canonicalKey(description);
-    if (!variantCounts.has(key)) variantCounts.set(key, new Map());
-    const variants = variantCounts.get(key);
-    variants.set(description, (variants.get(description) || 0) + 1);
-  }
-
-  const catalogMap = new Map(); // תיאור (כל ניסוח) -> רשומת קטלוג
-  for (const row of siteRows) {
-    const description = String(row[columns.description]).trim();
-    if (!description || catalogMap.has(description)) continue;
-    const key = canonicalKey(description);
-    const variants = [...variantCounts.get(key).entries()].sort((a, b) => b[1] - a[1]);
-    const canonical = variants[0][0];
-    const existing = [...catalogMap.values()].find((entry) => entry.description === canonical);
-    if (existing) {
-      catalogMap.set(description, existing);
-      continue;
-    }
-    const type = columns.type ? String(row[columns.type]).trim() : '';
-    const override = catalogOverrides[canonical] || catalogOverrides[description];
-    const swlFromAny = variants.map(([v]) => swlFromDescription(v)).find((v) => v !== '') ?? '';
-    const entry = {
-      id: slug(canonical) || `type-${catalogMap.size + 1}`,
-      type,
-      description: canonical,
-      swl: override?.swl !== undefined && override.swl !== '' ? override.swl : swlFromAny,
-      aliases: override?.aliases?.length ? override.aliases : defaultAliases(type, canonical),
-    };
-    catalogMap.set(description, entry);
-  }
-  const catalog = [...new Set(catalogMap.values())].sort((a, b) => a.type.localeCompare(b.type) || a.description.localeCompare(b.description));
-
-  const seen = new Set();
-  const items = siteRows.map((row) => {
-    const serial = String(row[columns.serial]).trim();
-    let id = serial;
-    let n = 2;
-    while (seen.has(id)) id = `${serial}#${n++}`;
-    seen.add(id);
-    const description = String(row[columns.description]).trim();
-    return {
-      id,
-      serial,
-      catalogId: catalogMap.get(description)?.id || null,
-      location: columns.location ? String(row[columns.location]).trim() : '',
-      prevReportNumber: columns.reportNumber ? String(row[columns.reportNumber]).trim() : '',
-      prevInspection: columns.lastInspection ? formatDate(row[columns.lastInspection]) : '',
-      prevResult: columns.prevResult ? String(row[columns.prevResult]).trim() : '',
-    };
-  });
-
-  const locations = [...new Set(items.map((i) => i.location).filter(Boolean))];
-  return { clientName, siteName: site, catalog, locations, items };
+  return { sheetName, headers, columns, rows, sites, locationsBySite, typeMemory, typesSheetRows, otherSheets };
 }
 
 // ---------- כתיבה ----------
 
-function defectsText(item) {
-  const parts = item.defects.map((d) => d.label);
-  if (item.note) parts.push(item.note);
-  return parts.join(', ');
+function defectsText(entry) {
+  return [...entry.defects.map((d) => d.label), entry.note].filter(Boolean).join(', ');
 }
 
-/**
- * עדכון שורות הריכוז בתוצאות הסשן: עמודות הבדיקה הנוכחית לפריטים שנבדקו, ושורות חדשות לפריטים חדשים.
- * @returns {{headers: string[], rows: Object[]}}
- */
-export function applySessionToRows(parsed, state, { site, date }) {
-  const { columns } = parsed;
-  const resultHeaders = Object.values(RESULT_COLUMNS);
-  const headers = [...parsed.headers, ...resultHeaders.filter((h) => !parsed.headers.includes(h))];
-
-  // מיפוי פריטי הסשן לפי מספר סידורי (ללא סיומת #n של כפילויות)
-  const bySerial = new Map();
-  for (const id of state.order) {
-    const item = state.items[id];
-    if (!bySerial.has(item.serial)) bySerial.set(item.serial, []);
-    bySerial.get(item.serial).push(item);
-  }
-
-  const usedIds = new Set();
-  const rows = parsed.rows.map((row) => {
-    const rowSite = columns.site ? String(row[columns.site]).trim() : site;
-    if (rowSite !== site) return { ...row };
-    const serial = String(row[columns.serial]).trim();
-    const candidates = (bySerial.get(serial) || []).filter((item) => !usedIds.has(item.id));
-    const item = candidates[0];
-    if (!item || item.status === 'pending') return { ...row };
-    usedIds.add(item.id);
-    return { ...row, ...resultCells(item, date) };
-  });
-
-  // פריטים חדשים (לא היו בקובץ)
-  for (const id of state.order) {
-    const item = state.items[id];
-    if (!item.isNew || usedIds.has(id)) continue;
-    rows.push({
-      ...(columns.site ? { [columns.site]: site } : {}),
-      ...(columns.type ? { [columns.type]: item.type } : {}),
-      [columns.description]: item.description,
-      [columns.serial]: item.serial,
-      ...(columns.location ? { [columns.location]: item.location } : {}),
-      ...(columns.source ? { [columns.source]: 'בדיקה בשטח' } : {}),
-      ...resultCells(item, date),
-    });
-  }
-
-  return { headers, rows };
+function typeInfoMap(reconciliation) {
+  return Object.fromEntries(reconciliation.types.map((t) => [t.key, t]));
 }
 
-function resultCells(item, date) {
+function resultCells(entry, result, typeInfo, date) {
   return {
     [RESULT_COLUMNS.currentDate]: date,
-    [RESULT_COLUMNS.currentResult]: STATUS_TEXT[item.status] ?? item.status,
-    [RESULT_COLUMNS.currentDefects]: defectsText(item),
-    [RESULT_COLUMNS.currentLocation]: item.location,
-    [RESULT_COLUMNS.previousLocation]: item.prevLocation && item.prevLocation !== item.location ? item.prevLocation : '',
-    [RESULT_COLUMNS.swl]: item.swl ?? '',
-    [RESULT_COLUMNS.isNew]: item.isNew ? 'כן' : '',
-    [RESULT_COLUMNS.confidence]: item.confidence === null || item.confidence === undefined ? '' : Math.round(item.confidence * 100) / 100,
+    [RESULT_COLUMNS.currentResult]: STATUS_TEXT[entry.status],
+    [RESULT_COLUMNS.currentDefects]: defectsText(entry),
+    [RESULT_COLUMNS.currentLocation]: entry.location,
+    [RESULT_COLUMNS.previousLocation]: result.moved ? result.prev?.location ?? '' : '',
+    [RESULT_COLUMNS.spokenType]: entry.type,
+    [RESULT_COLUMNS.swl]: typeInfo?.swl ?? '',
+    [RESULT_COLUMNS.isNew]: result.status === 'new' ? 'כן' : '',
+    [RESULT_COLUMNS.review]: result.review ? result.reason : '',
+    [RESULT_COLUMNS.confidence]: entry.confidence === null || entry.confidence === undefined ? '' : Math.round(entry.confidence * 100) / 100,
   };
 }
 
-/** הפריטים שנבדקו בסשן, בסדר של התסקיר: סוג -> מיקום -> תיאור -> מספר */
-export function inspectedItems(state) {
-  return state.order
-    .map((id) => state.items[id])
-    .filter((item) => item.status !== 'pending')
-    .sort((a, b) => a.type.localeCompare(b.type) || a.location.localeCompare(b.location) || a.description.localeCompare(b.description) || a.serial.localeCompare(b.serial, undefined, { numeric: true }));
+/**
+ * שורות הריכוז המעודכנות: פריט ישן - מיקום (ואתר) מתעדכנים לאחרון + עמודות הבדיקה; פריט חדש - שורה חדשה.
+ */
+export function applyToRows(parsed, state, reconciliation, { date }) {
+  const { columns } = parsed;
+  const headers = [...parsed.headers, ...Object.values(RESULT_COLUMNS).filter((h) => !parsed.headers.includes(h))];
+  const types = typeInfoMap(reconciliation);
+  const rows = parsed.rows.map((row) => ({ ...row }));
+
+  for (const entry of state.entries) {
+    const result = reconciliation.results[entry.id];
+    const typeInfo = types[entry.typeKey];
+    const cells = resultCells(entry, result, typeInfo, date);
+
+    if (result.status === 'old' && result.rowIndex !== null && result.rowIndex !== undefined) {
+      const row = rows[result.rowIndex];
+      if (columns.location) row[columns.location] = entry.location;
+      if (columns.site && state.site) row[columns.site] = state.site;
+      Object.assign(row, cells);
+      continue;
+    }
+
+    rows.push({
+      ...(columns.site ? { [columns.site]: state.site } : {}),
+      ...(columns.type ? { [columns.type]: typeInfo?.fileType ?? '' } : {}),
+      [columns.description]: typeInfo?.reportDescription ?? entry.type,
+      [columns.serial]: entry.serial,
+      ...(columns.location ? { [columns.location]: entry.location } : {}),
+      ...(columns.source ? { [columns.source]: 'בדיקה בשטח' } : {}),
+      ...cells,
+    });
+  }
+  return { headers, rows };
 }
 
-/** גיליון "נבדקו" - שורה לכל פריט שנבדק, עם הנתונים הנדרשים לתסקיר */
-export function buildInspectedRows(state, { site, date }) {
-  return inspectedItems(state).map((item) => ({
-    'אתר': site,
-    'תאריך בדיקה': date,
-    'סוג': item.type,
-    'מיקום': item.location,
-    'תיאור לתסקיר': item.description,
-    'עומס עבודה (טון)': item.swl ?? '',
-    "מס' סידורי": item.serial,
-    'תוצאה': STATUS_TEXT[item.status],
-    'ליקויים / הערה': defectsText(item),
-    'פריט חדש': item.isNew ? 'כן' : '',
-    'מיקום קודם': item.prevLocation && item.prevLocation !== item.location ? item.prevLocation : '',
-    'תסקיר קודם': item.prevReportNumber,
-    'בדיקה קודמת': item.prevInspection,
+/** סדר התסקיר: מיקום -> סוג -> מספר */
+function sortedEntries(state) {
+  return [...state.entries].sort((a, b) =>
+    a.location.localeCompare(b.location) || a.type.localeCompare(b.type) || a.serial.localeCompare(b.serial, undefined, { numeric: true }));
+}
+
+/** גיליון "נבדקו" - שורה לכל פריט שנבדק, עם כל הנתונים לתסקיר */
+export function buildInspectedRows(state, reconciliation, { site, date }) {
+  const types = typeInfoMap(reconciliation);
+  return sortedEntries(state).map((entry) => {
+    const result = reconciliation.results[entry.id];
+    const typeInfo = types[entry.typeKey];
+    return {
+      'אתר': site,
+      'תאריך בדיקה': date,
+      'מיקום': entry.location,
+      'סוג כפי שנאמר': entry.type,
+      'תיאור לתסקיר': typeInfo?.reportDescription ?? entry.type,
+      'עומס עבודה (טון)': typeInfo?.swl ?? '',
+      "מס' סידורי": entry.serial,
+      'תוצאה': STATUS_TEXT[entry.status],
+      'ליקויים / הערה': defectsText(entry),
+      'ישן / חדש': result.status === 'old' ? 'ישן' : 'חדש',
+      'מיקום קודם': result.prev?.location ?? '',
+      "מס' בקובץ": result.prev?.serial ?? '',
+      'תסקיר קודם': result.prev?.reportNumber ?? '',
+      'בדיקה קודמת': result.prev?.date ?? '',
+      'לבדיקה': result.review ? result.reason : '',
+    };
+  });
+}
+
+/** גיליון "לא נבדקו" - פריטי האתר מהקובץ שלא נאמרו היום */
+export function buildNotInspectedRows(parsed, reconciliation) {
+  const { columns, rows } = parsed;
+  return reconciliation.notInspected.map((i) => ({
+    "מס' סידורי": rows[i][columns.serial],
+    'סוג': columns.type ? rows[i][columns.type] : '',
+    'תיאור': rows[i][columns.description],
+    'מיקום': columns.location ? rows[i][columns.location] : '',
+    'בדיקה אחרונה': columns.lastInspection ? formatDate(rows[i][columns.lastInspection]) : '',
+    'ממצא אחרון': columns.prevResult ? rows[i][columns.prevResult] : '',
   }));
 }
 
-/** JSON למחולל התסקירים: קבוצות של סוג × מיקום, בכל קבוצה שורות לפי תיאור עם רשימת מספרים */
-export function buildReportJson(state, { clientName, site, date }) {
+/**
+ * JSON לתסקירים: קבוצה לכל מיקום × סוג = תסקיר; שורות לפי תיאור + עומס עם רשימת מספרים;
+ * ליקויים (כולל הערות על פריטים תקינים) עם מספר הפריט.
+ */
+export function buildReportJson(state, reconciliation, { clientName, site, date }) {
+  const types = typeInfoMap(reconciliation);
   const groups = new Map();
-  for (const item of inspectedItems(state)) {
-    if (item.status === 'notFound') continue;
-    const key = `${item.type}||${item.location}`;
-    if (!groups.has(key)) groups.set(key, { type: item.type, location: item.location, lines: new Map(), defects: [] });
+  for (const entry of sortedEntries(state)) {
+    const result = reconciliation.results[entry.id];
+    const typeInfo = types[entry.typeKey];
+    const key = `${entry.location}||${entry.typeKey}`;
+    if (!groups.has(key)) {
+      groups.set(key, { location: entry.location, type: typeInfo?.fileType ?? entry.type, spokenType: entry.type, lines: new Map(), defects: [] });
+    }
     const group = groups.get(key);
-    const lineKey = `${item.description}||${item.swl}`;
-    if (!group.lines.has(lineKey)) group.lines.set(lineKey, { description: item.description, swl: item.swl ?? '', serials: [], failedSerials: [] });
+    const description = typeInfo?.reportDescription ?? entry.type;
+    const swl = typeInfo?.swl ?? '';
+    const lineKey = `${description}||${swl}`;
+    if (!group.lines.has(lineKey)) group.lines.set(lineKey, { description, swl, serials: [], failedSerials: [], newSerials: [] });
     const line = group.lines.get(lineKey);
-    (item.status === 'fail' ? line.failedSerials : line.serials).push(item.serial);
-    if (item.defects.length || item.note) group.defects.push({ serial: item.serial, status: item.status, text: defectsText(item), isNew: item.isNew });
+    (entry.status === 'fail' ? line.failedSerials : line.serials).push(entry.serial);
+    if (result.status === 'new') line.newSerials.push(entry.serial);
+    if (entry.defects.length || entry.note) {
+      group.defects.push({ serial: entry.serial, status: entry.status, text: defectsText(entry), isNew: result.status === 'new' });
+    }
   }
   return {
     clientName,
     site,
     date,
-    counts: countItems(state),
-    notFound: state.order.map((id) => state.items[id]).filter((i) => i.status === 'notFound').map((i) => ({ serial: i.serial, description: i.description, location: i.location })),
-    moved: state.moved.map((id) => state.items[id]).map((i) => ({ serial: i.serial, from: i.prevLocation, to: i.location })),
-    groups: [...groups.values()].map((g) => ({ ...g, lines: [...g.lines.values()].map((l) => ({ ...l, quantity: l.serials.length + l.failedSerials.length })) })),
+    counts: reconciliation.counts,
+    groups: [...groups.values()].map((g) => ({
+      ...g,
+      lines: [...g.lines.values()].map((l) => ({ ...l, quantity: l.serials.length + l.failedSerials.length })),
+    })),
+    moved: state.entries
+      .filter((e) => reconciliation.results[e.id].moved)
+      .map((e) => ({ serial: e.serial, from: reconciliation.results[e.id].prev.location, to: e.location })),
+    notInspectedCount: reconciliation.notInspected.length,
   };
 }
 
-function countItems(state) {
-  const counts = { total: state.order.length, ok: 0, fail: 0, notFound: 0, pending: 0, new: 0 };
-  for (const id of state.order) {
-    const item = state.items[id];
-    counts[item.status]++;
-    if (item.isNew) counts.new++;
-  }
-  return counts;
-}
-
-/** גיליון קטלוג לייצוא (ניתן לעריכה באקסל ולטעינה חוזרת) */
-function buildCatalogRows(catalog) {
-  return catalog.map((entry) => ({ 'סוג': entry.type, 'תיאור': entry.description, 'עומס (טון)': entry.swl ?? '', 'כינויים קוליים': (entry.aliases || []).join(' | ') }));
-}
-
-/**
- * בניית חוברת העבודה המעודכנת: הריכוז (כל האתרים) עם עמודות הבדיקה, גיליון "נבדקו", "קטלוג" ושאר הגיליונות המקוריים.
- */
-export function buildUpdatedWorkbook(parsed, state, meta) {
-  const { headers, rows } = applySessionToRows(parsed, state, meta);
+/** חוברת העבודה המעודכנת: ריכוז + נבדקו + לא נבדקו + סוגים + מיקומים + שאר הגיליונות המקוריים */
+export function buildUpdatedWorkbook(parsed, state, reconciliation, meta) {
   const workbook = XLSX.utils.book_new();
+  const { headers, rows } = applyToRows(parsed, state, reconciliation, meta);
+  XLSX.utils.book_append_sheet(workbook, sheetWithRtl(XLSX.utils.json_to_sheet(rows, { header: headers })), parsed.sheetName);
 
-  const summarySheet = XLSX.utils.json_to_sheet(rows, { header: headers });
-  summarySheet['!views'] = [{ RTL: true }];
-  XLSX.utils.book_append_sheet(workbook, summarySheet, parsed.sheetName);
+  const inspectedName = `נבדקו ${meta.date.replace(/\//g, '.')}`.slice(0, 31);
+  const inspected = buildInspectedRows(state, reconciliation, meta);
+  XLSX.utils.book_append_sheet(workbook, sheetWithRtl(XLSX.utils.json_to_sheet(inspected.length ? inspected : [{ 'אתר': meta.site }])), inspectedName);
 
-  const inspected = buildInspectedRows(state, meta);
-  const inspectedSheet = XLSX.utils.json_to_sheet(inspected.length ? inspected : [{ 'אתר': meta.site, 'תאריך בדיקה': meta.date }]);
-  inspectedSheet['!views'] = [{ RTL: true }];
-  XLSX.utils.book_append_sheet(workbook, inspectedSheet, `נבדקו ${meta.date.replace(/\//g, '.')}`.slice(0, 31));
+  const notInspected = buildNotInspectedRows(parsed, reconciliation);
+  XLSX.utils.book_append_sheet(workbook, sheetWithRtl(XLSX.utils.json_to_sheet(notInspected.length ? notInspected : [{ "מס' סידורי": '' }])), NOT_INSPECTED_SHEET);
 
-  const catalogSheet = XLSX.utils.json_to_sheet(buildCatalogRows(state.catalog));
-  catalogSheet['!views'] = [{ RTL: true }];
-  XLSX.utils.book_append_sheet(workbook, catalogSheet, CATALOG_SHEET);
+  // סוגים: הסוגים של היום + זיכרון קודם שלא נאמר היום (כדי שלא יאבד)
+  const typeRows = reconciliation.types.map((t) => ({
+    'סוג כפי שנאמר': t.name, 'תיאור לתסקיר': t.reportDescription, 'עומס (טון)': t.swl ?? '', 'משפחה': t.fileType, 'פריטים היום': t.count, 'חדשים היום': t.newCount, 'סוג חדש': t.isNewType ? 'כן' : '',
+  }));
+  const todayKeys = new Set(reconciliation.types.map((t) => t.key));
+  for (const { key, row } of parsed.typesSheetRows || []) if (!todayKeys.has(key)) typeRows.push(row);
+  XLSX.utils.book_append_sheet(workbook, sheetWithRtl(XLSX.utils.json_to_sheet(typeRows.length ? typeRows : [{ 'סוג כפי שנאמר': '' }])), TYPES_SHEET);
+
+  const locationRows = reconciliation.locations.map((l) => ({ 'מיקום': l.name, 'פריטים היום': l.count, 'מיקום חדש': l.isNew ? 'כן' : '' }));
+  XLSX.utils.book_append_sheet(workbook, sheetWithRtl(XLSX.utils.json_to_sheet(locationRows.length ? locationRows : [{ 'מיקום': '' }])), LOCATIONS_SHEET);
 
   for (const other of parsed.otherSheets) {
-    if (workbook.SheetNames.includes(other.name)) continue;
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(other.data), other.name.slice(0, 31));
+    const name = other.name.slice(0, 31);
+    if (workbook.SheetNames.includes(name)) continue;
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(other.data), name);
   }
   return workbook;
 }
 
-/** חוברת -> bytes (לשמירה / הורדה) */
 export function workbookToBytes(workbook) {
   return XLSX.write(workbook, { type: 'array', bookType: 'xlsx' });
+}
+
+/** קובץ "נבדקו" בלבד */
+export function buildInspectedWorkbook(state, reconciliation, meta) {
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, sheetWithRtl(XLSX.utils.json_to_sheet(buildInspectedRows(state, reconciliation, meta))), 'נבדקו');
+  return workbook;
 }

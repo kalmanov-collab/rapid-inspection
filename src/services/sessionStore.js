@@ -4,7 +4,8 @@
  */
 import { get, set, del } from 'idb-keyval';
 
-const KEYS = { parsed: 'rapid.parsed', state: 'rapid.state', meta: 'rapid.meta' };
+// גרסה 3: מפתחות חדשים - סשן שמור מהגרסה הקודמת (מבנה אחר) לא נטען
+const KEYS = { parsed: 'rapid3.parsed', state: 'rapid3.state', meta: 'rapid3.meta' };
 
 export async function saveParsed(parsed) {
   await set(KEYS.parsed, parsed);
@@ -14,14 +15,15 @@ export async function saveMeta(meta) {
   await set(KEYS.meta, meta);
 }
 
-/** שמירת מצב הבדיקה - נקרא אחרי כל שינוי; הלוג מקוצר כדי לא לנפח את האחסון */
+/** שמירת מצב הבדיקה - נקרא אחרי כל שינוי; ההיסטוריה (לביטול) מקוצרת כדי לא לנפח את האחסון */
 export async function saveState(state) {
-  await set(KEYS.state, { ...state, log: state.log.slice(0, 50) });
+  await set(KEYS.state, { ...state, history: state.history.slice(-30) });
 }
 
 export async function loadSaved() {
   const [parsed, state, meta] = await Promise.all([get(KEYS.parsed), get(KEYS.state), get(KEYS.meta)]);
   if (!parsed || !meta) return null;
+  if (state && !Array.isArray(state.entries)) return { parsed, state: null, meta };
   return { parsed, state: state || null, meta };
 }
 
