@@ -8,11 +8,15 @@
  *   התאמה ברורה -> מיד; כמה אפשרויות -> בחירה במסך / במספר; אין התאמה -> שאלה "להוסיף סוג חדש?"
  *   והבודק כותב בדיוק איך הסוג יופיע. השם שנאמר נשמר כ"כינוי" - בפעם הבאה ההתאמה מיידית.
  *
+ * לוח כתיבה: state.draft הוא הטקסט שנכתב (מספרים מופרדים בפסיק) עבור המיקום והסוג הפעילים.
+ *   commitDraft רושם אותו; החלפת מיקום / סוג רושמת אותו קודם תחת ההקשר הישן ופותחת לוח ריק.
+ *
  * כל פעולה מחזירה { state, feedback }:
  *   feedback = { beep?: 'ok'|'fail'|'context'|'dup'|'ask'|'error'|'undo', message?, speak?, control? }
  */
 import { parseFieldCommand, normalizeSerial, nameKey } from './fieldParser.js';
 import { matchType, catalogKey, swlFromColor } from './typeCatalog.js';
+import { parseWrittenList } from './writtenList.js';
 
 export const STATUS_LABELS = { ok: 'תקין', fail: 'פסול' };
 
@@ -49,6 +53,7 @@ export function createFieldState({ site, clientName = '', knownLocations = [], c
     catalog,
     typeMemory,
     pending: null,        // { kind: 'chooseType', spoken, candidates } | { kind: 'newType', spoken }
+    draft: '',            // טקסט לוח הכתיבה של המיקום והסוג הפעילים (טרם נרשם)
     entries: [],
     seq: 0,
     lastId: null,
@@ -98,6 +103,9 @@ function describeEntry(entry) {
 export function setLocation(state, name) {
   const clean = String(name || '').trim();
   if (!clean) return { state, feedback: { beep: 'error', message: 'אמור "מיקום" ואת שם המיקום', speak: 'איזה מיקום?' } };
+  const flushed = flushDraft(state);
+  if (flushed.blocked) return flushed.blocked;
+  state = flushed.state;
   const key = nameKey(clean);
   const existing = state.locations.find((l) => l.key === key);
   const finalName = existing ? existing.name : clean;
@@ -105,7 +113,7 @@ export function setLocation(state, name) {
   const isNew = !existing || !existing.known;
   return {
     state: { ...state, location: finalName, locations, history: pushHistory(state, { kind: 'context', previous: contextSnapshot(state) }) },
-    feedback: { beep: 'context', message: `מיקום: ${finalName}${isNew ? ' (חדש)' : ''}`, speak: `מיקום ${finalName}` },
+    feedback: { beep: 'context', message: `${flushed.prefix}מיקום: ${finalName}${isNew ? ' (חדש)' : ''}`, speak: `מיקום ${finalName}` },
   };
 }
 
@@ -136,6 +144,9 @@ function activateType(state, name, pattern, isNew = false) {
 export function setType(state, name) {
   const clean = String(name || '').trim();
   if (!clean) return { state, feedback: { beep: 'error', message: 'אמור "סוג" ואת שם הסוג', speak: 'איזה סוג?' } };
+  const flushed = flushDraft(state);
+  if (flushed.blocked) return flushed.blocked;
+  state = flushed.state;
   const key = nameKey(clean);
 
   // 1. כבר נאמר בסשן הזה
@@ -168,6 +179,9 @@ export function setType(state, name) {
 export function chooseType(state, key) {
   const pattern = state.catalog.find((entry) => entry.key === key);
   if (!pattern) return { state, feedback: { beep: 'error', message: 'סוג לא נמצא' } };
+  const flushed = flushDraft(state);
+  if (flushed.blocked) return flushed.blocked;
+  state = flushed.state;
   const name = state.pending?.spoken || pattern.description;
   return activateType(state, name, pattern);
 }
@@ -176,6 +190,9 @@ export function chooseType(state, key) {
 export function confirmNewType(state, description, swl = '') {
   const clean = String(description || '').trim();
   if (!clean) return { state, feedback: { beep: 'error', message: 'יש לכתוב את שם הסוג' } };
+  const flushed = flushDraft(state);
+  if (flushed.blocked) return flushed.blocked;
+  state = flushed.state;
   const key = catalogKey(clean);
   const existingPattern = state.catalog.find((entry) => entry.key === key);
   const name = state.pending?.spoken || clean;
@@ -191,6 +208,93 @@ export function confirmNewType(state, description, swl = '') {
 export function cancelPending(state) {
   if (!state.pending) return { state, feedback: {} };
   return { state: { ...state, pending: null }, feedback: { beep: 'undo', message: state.type ? `נשאר הסוג: ${state.type}` : 'בוטל' } };
+}
+
+// ---------- לוח כתיבה ----------
+
+/** עדכון טקסט הלוח (בכל שינוי בכתיבה) - לא נכנס להיסטוריית הביטול */
+export function setDraft(state, text) {
+  const draft = String(text ?? '');
+  return draft === (state.draft || '') ? state : { ...state, draft };
+}
+
+/**
+ * רישום כל המספרים התקינים שבלוח תחת המיקום והסוג הפעילים, כפעולה אחת (ביטול אחד מחזיר את כולה).
+ * מספרים שלא זוהו נשארים בלוח לתיקון. שאלת סוג פתוחה לא חוסמת: הפריטים שייכים לסוג הפעיל.
+ */
+export function commitDraft(state) {
+  const text = state.draft || '';
+  const { items, validCount, invalidCount } = parseWrittenList(text);
+  if (!items.length) return { state: text ? { ...state, draft: '' } : state, feedback: { beep: 'error', message: 'הלוח ריק' } };
+  if (!state.location) return { state, feedback: { beep: 'error', message: 'אין מיקום פעיל - קבע מיקום לפני הרישום', speak: 'אין מיקום' } };
+  if (!state.type) return { state, feedback: { beep: 'error', message: 'אין סוג פעיל - קבע סוג לפני הרישום', speak: 'אין סוג' } };
+  if (!validCount) return { state, feedback: { beep: 'error', message: `לא זוהה אף מספר תקין בלוח (${invalidCount})` } };
+
+  const typeKey = nameKey(state.type);
+  const time = Date.now();
+  let entries = state.entries;
+  let seq = state.seq;
+  let lastId = state.lastId;
+  const addedIds = [];
+  const updates = [];
+  const touched = new Set();
+  let failed = 0;
+
+  for (const item of items) {
+    if (!item.valid) continue;
+    const key = normalizeSerial(item.serial);
+    const duplicate = entries.find((e) => e.key === key && e.typeKey === typeKey);
+    if (duplicate) {
+      // הגרסה שלפני הפעולה נשמרת פעם אחת בלבד, גם אם המספר נכתב פעמיים באותו לוח
+      if (!touched.has(duplicate.id)) {
+        touched.add(duplicate.id);
+        if (!addedIds.includes(duplicate.id)) updates.push({ id: duplicate.id, previous: duplicate });
+      }
+      const updated = { ...duplicate, status: item.status, defects: item.defects, note: item.note, location: state.location, time, confidence: 1, timesSaid: duplicate.timesSaid + 1 };
+      entries = entries.map((e) => (e.id === duplicate.id ? updated : e));
+      lastId = duplicate.id;
+    } else {
+      seq += 1;
+      entries = [...entries, { id: seq, serial: item.serial, key, type: state.type, typeKey, location: state.location, status: item.status, defects: item.defects, note: item.note, time, confidence: 1, timesSaid: 1, source: 'written' }];
+      addedIds.push(seq);
+      lastId = seq;
+    }
+  }
+  for (const id of new Set([...addedIds, ...touched])) if (entries.find((e) => e.id === id)?.status === 'fail') failed++;
+
+  const draft = items.filter((item) => !item.valid).map((item) => item.raw).join(', ');
+  const parts = [`נרשמו ${addedIds.length} מהלוח`];
+  if (updates.length) parts.push(`עודכנו ${updates.length}`);
+  if (failed) parts.push(`פסולים ${failed}`);
+  if (invalidCount) parts.push(`${invalidCount} לא זוהו - נשארו בלוח`);
+  return {
+    state: {
+      ...state, entries, seq, lastId, draft,
+      history: pushHistory(state, { kind: 'batch', addedIds, updates, previousLastId: state.lastId, previousDraft: text, leftover: draft }),
+    },
+    feedback: { beep: invalidCount ? 'dup' : failed ? 'fail' : 'ok', message: parts.join(' · ') },
+    invalidCount,
+  };
+}
+
+/**
+ * לפני החלפת מיקום / סוג: רישום הלוח תחת ההקשר הישן, כדי שהלוח הבא ייפתח ריק.
+ * אם נשארו בלוח מספרים שלא זוהו - ההחלפה נחסמת (blocked), כדי שמספר לא ייעלם בשקט.
+ */
+function flushDraft(state) {
+  if (!(state.draft || '').trim()) return { state: state.draft ? { ...state, draft: '' } : state, prefix: '' };
+  // בלי מיקום או סוג אין לאן לרשום (הלוח נעול במצב הזה) - טקסט שנשאר נמחק
+  if (!state.location || !state.type) return { state: { ...state, draft: '' }, prefix: '' };
+  const result = commitDraft(state);
+  if (result.state.draft) {
+    return {
+      blocked: {
+        state: result.state,
+        feedback: { beep: 'error', message: `בלוח נשארו מספרים שלא זוהו (${result.state.draft}) - תקן או מחק אותם לפני ההחלפה`, speak: 'יש בלוח מספרים שלא זוהו' },
+      },
+    };
+  }
+  return { state: result.state, prefix: `${result.feedback.message} · ` };
 }
 
 // ---------- פריטים ----------
@@ -268,6 +372,19 @@ export function undo(state) {
       const entries = [...state.entries];
       entries.splice(action.index, 0, action.entry);
       return { state: { ...state, entries, lastId: action.previousLastId, history }, feedback: { beep: 'undo', message: `שוחזר: ${action.entry.serial}` } };
+    }
+    case 'batch': {
+      const removed = new Set(action.addedIds);
+      const previousById = new Map(action.updates.map((u) => [u.id, u.previous]));
+      const entries = state.entries.filter((e) => !removed.has(e.id)).map((e) => previousById.get(e.id) || e);
+      // מה שנכתב בלוח אחרי הרישום לא נמחק: הטקסט המוחזר מצטרף לפניו
+      const current = (state.draft || '').trim();
+      const written = current && current !== (action.leftover || '').trim() ? current : '';
+      const restoredDraft = [action.previousDraft.replace(/[\s,]+$/, ''), written].filter(Boolean).join(', ');
+      return {
+        state: { ...state, entries, lastId: action.previousLastId, draft: restoredDraft, history },
+        feedback: { beep: 'undo', message: `בוטל רישום הלוח (${action.addedIds.length + action.updates.length} פריטים) - הטקסט הוחזר ללוח`, speak: 'בוטל' },
+      };
     }
     case 'context':
       return { state: { ...state, ...action.previous, history }, feedback: { beep: 'undo', message: 'בוטל שינוי מיקום / סוג', speak: 'בוטל' } };

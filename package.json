@@ -8,7 +8,7 @@
     "dev": "vite --host",
     "build": "vite build",
     "preview": "vite preview --host",
-    "test": "node tests/fieldParser.test.mjs && node tests/fieldSession.test.mjs && node tests/reconcile.test.mjs",
+    "test": "node tests/fieldParser.test.mjs && node tests/writtenList.test.mjs && node tests/fieldSession.test.mjs && node tests/reconcile.test.mjs",
     "lint": "eslint src"
   },
   "dependencies": {

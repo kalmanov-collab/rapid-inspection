@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import {
   createFieldState, applyTranscript, getCounts, currentEntries, setEntryStatus, removeEntry, undo, setTypeSetting, setMatchOverride,
-  chooseType, confirmNewType, activeTypeInfo,
+  chooseType, confirmNewType, activeTypeInfo, setDraft, commitDraft, setLocation,
 } from '../src/utils/fieldSession.js';
 import { buildTypeCatalog, matchType, catalogKey, swlFromColor } from '../src/utils/typeCatalog.js';
 
@@ -162,5 +162,75 @@ assert.equal(state.matchOverrides[1], undefined);
 const before = state;
 say('בוקר טוב');
 assert.equal(state, before);
+
+// ---------- לוח כתיבה ----------
+{
+  let pad = createFieldState({ site: 'קישון', knownLocations: ['מחסן כלים'], catalog });
+  const run = (result) => { pad = result.state; return result.feedback; };
+  run(applyTranscript(pad, 'מיקום מחסן כלים'));
+  run(applyTranscript(pad, "סוג רצועה עגולה ירוקה 4 מ'"));
+  assert.equal(pad.draft, '');
+
+  // רישום הלוח: פסיק מפריד, "פסול" אחרי המספר, מספר לא מזוהה נשאר בלוח
+  pad = setDraft(pad, '2345/3, 2346/3 פסול, ??, K500158, 2345/03');
+  let feedback = run(commitDraft(pad));
+  assert.equal(pad.entries.length, 3, 'אותו מספר פעמיים בלוח = פריט אחד');
+  assert.deepEqual(pad.entries.map((e) => [e.serial, e.status]), [['2345/03', 'ok'], ['2346/3', 'fail'], ['K500158', 'ok']].map(([s, st], i) => [i === 0 ? '2345/3' : s, st]));
+  assert.equal(pad.entries[0].timesSaid, 2);
+  assert.equal(pad.entries[1].location, 'מחסן כלים');
+  assert.equal(pad.draft, '??', 'מה שלא זוהה נשאר לתיקון');
+  assert.match(feedback.message, /נרשמו 3 מהלוח.*פסולים 1.*1 לא זוהו/);
+
+  // החלפת מיקום נחסמת כל עוד נשאר בלוח מספר לא מזוהה
+  feedback = run(applyTranscript(pad, 'מיקום חדש ארובה'));
+  assert.equal(pad.location, 'מחסן כלים');
+  assert.equal(feedback.beep, 'error');
+
+  // ביטול אחד מחזיר את כל הלוח
+  pad = setDraft(pad, '');
+  pad = setDraft(pad, '7001, 7002 פסול חתך');
+  run(commitDraft(pad));
+  assert.equal(pad.entries.length, 5);
+  assert.equal(pad.entries[4].defects[0].code, 'CUT');
+  run(undo(pad));
+  assert.equal(pad.entries.length, 3);
+  assert.equal(pad.draft, '7001, 7002 פסול חתך');
+
+  // החלפת מיקום / סוג רושמת את הלוח תחת ההקשר הישן ופותחת לוח ריק
+  feedback = run(applyTranscript(pad, 'מיקום חדש ארובה'));
+  assert.equal(pad.location, 'ארובה');
+  assert.equal(pad.draft, '');
+  assert.equal(pad.entries.length, 5);
+  assert.equal(pad.entries[4].location, 'מחסן כלים');
+  assert.match(feedback.message, /נרשמו 2 מהלוח.*מיקום: ארובה/);
+
+  pad = setDraft(pad, '8001');
+  run(applyTranscript(pad, 'סוג שאקל 7/8'));
+  assert.equal(pad.draft, '');
+  assert.match(pad.entries[5].type, /רצועה עגולה ירוקה/, 'נרשם תחת הסוג הקודם');
+  assert.equal(pad.entries[5].location, 'ארובה');
+
+  // סוג דו-משמעי: הלוח נרשם כבר בשלב השאלה, תחת הסוג הפעיל
+  pad = setDraft(pad, '8002');
+  run(applyTranscript(pad, 'סוג רצועה 4 מטר'));
+  assert.equal(pad.pending.kind, 'chooseType');
+  assert.equal(pad.entries[6].typeKey, pad.entries.find((e) => e.serial === '8002').typeKey);
+  assert.match(pad.entries[6].type, /שאקל/);
+  assert.equal(pad.draft, '');
+
+  // ביטול רישום כשכבר נכתב משהו חדש בלוח - שום דבר לא נמחק
+  run(chooseType(pad, pad.pending.candidates[0].key));
+  pad = setDraft(pad, '8101, 8102');
+  run(commitDraft(pad));
+  pad = setDraft(pad, '8103');
+  run(undo(pad));
+  assert.equal(pad.draft, '8101, 8102, 8103');
+
+  // לוח ריק / בלי מיקום
+  assert.equal(commitDraft(setDraft(pad, ' , ')).feedback.beep, 'error');
+  const empty = createFieldState({ site: 'קישון', catalog });
+  assert.equal(commitDraft(setDraft(empty, '123')).feedback.beep, 'error');
+  assert.equal(setLocation(setDraft(empty, '123'), 'מחסן').state.draft, '');
+}
 
 console.log('✔ כל תרחישי מנוע השטח עברו');

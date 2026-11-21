@@ -1,10 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { X, Mic, MicOff, Undo2, Check, Ban, Volume2, ListChecks, Tag, MapPin, Plus, Search, Trash2, HelpCircle } from 'lucide-react';
+import { X, Mic, MicOff, Undo2, Check, Ban, Volume2, ListChecks, Tag, MapPin, Plus, Search, Trash2, HelpCircle, PenLine } from 'lucide-react';
 import useFieldSession from '../hooks/useFieldSession';
-import { getCounts, currentEntries, activeTypeInfo, chooseType, confirmNewType, cancelPending, STATUS_LABELS } from '../utils/fieldSession';
+import { getCounts, currentEntries, activeTypeInfo, chooseType, confirmNewType, cancelPending, setDraft, commitDraft, STATUS_LABELS } from '../utils/fieldSession';
+import WritingPad from './WritingPad';
 
 /**
  * מסך הבדיקה בשטח: מיקום וסוג פעילים, ורצף מספרים שנרשמים מיד (בלי חיפוש בקובץ).
+ * המספרים נקלטים בקול, בהקלדה, או בכתיבה בעט בלוח הכתיבה (חצי מסך / 3/4 מסך).
  *
  * @param {Object} props
  * @param {Object} props.state - מצב הבדיקה
@@ -16,6 +18,7 @@ export default function FieldInspectionScreen({ state, onChange, onReview, onClo
   const field = useFieldSession({ state, onChange });
   const [manualSerial, setManualSerial] = useState('');
   const [picker, setPicker] = useState(null); // 'location' | 'type'
+  const [pad, setPad] = useState(loadPadPreference); // { open, size: 'half' | 'large' }
 
   const counts = useMemo(() => getCounts(state), [state]);
   const entries = useMemo(() => currentEntries(state), [state]);
@@ -25,6 +28,15 @@ export default function FieldInspectionScreen({ state, onChange, onReview, onClo
   const ready = Boolean(state.location && state.type && !state.pending);
 
   const apply = field.apply;
+
+  const updatePad = (patch) => {
+    const next = { ...pad, ...patch };
+    setPad(next);
+    savePadPreference(next);
+  };
+  const draft = state.draft || '';
+  // שאלת סוג פתוחה מוצגת במקום הלוח; אחרי התשובה הלוח חוזר (ריק - לסוג החדש)
+  const showPad = pad.open && !state.pending && !picker;
 
   const submitManual = (status) => {
     const serial = manualSerial.trim();
@@ -63,7 +75,28 @@ export default function FieldInspectionScreen({ state, onChange, onReview, onClo
         />
       </div>
 
-      <main className="flex-1 overflow-y-auto p-3 space-y-3">
+      {showPad && (
+        <>
+          <div className="flex-1 min-h-0 overflow-hidden px-3 py-1 flex items-center gap-2 text-sm">
+            {field.isSpeaking ? <Volume2 size={18} className="text-blue-300 animate-pulse shrink-0" /> : speech.isListening ? <Mic size={18} className="text-emerald-400 animate-pulse shrink-0" /> : <MicOff size={18} className="text-gray-500 shrink-0" />}
+            <span className="text-gray-300 truncate">{speech.error || speech.interimText || field.lastMessage || 'כתוב מספרים מופרדים בפסיק; "פסול" אחרי מספר פוסל אותו'}</span>
+          </div>
+          <WritingPad
+            text={draft}
+            onText={(text) => onChange(setDraft(state, text))}
+            onCommit={() => apply(commitDraft(state))}
+            onUndo={field.undo}
+            onClose={() => updatePad({ open: false })}
+            ready={ready}
+            size={pad.size}
+            onSize={(size) => updatePad({ size })}
+            speech={speech}
+            hereCount={counts.here}
+          />
+        </>
+      )}
+
+      {!showPad && <main className="flex-1 overflow-y-auto p-3 space-y-3">
         <div className="flex items-center gap-2 text-sm min-h-[1.5rem]">
           {field.isSpeaking ? <Volume2 size={18} className="text-blue-300 animate-pulse" /> : speech.isListening ? <Mic size={18} className="text-emerald-400 animate-pulse" /> : <MicOff size={18} className="text-gray-500" />}
           <span className="text-gray-300 truncate">{speech.error || speech.interimText || field.lastMessage || (speech.isListening ? 'מקשיב...' : 'לחץ על המיקרופון כדי להתחיל')}</span>
@@ -136,14 +169,18 @@ export default function FieldInspectionScreen({ state, onChange, onReview, onClo
             ))}
           </ul>
         </div>
-      </main>
+      </main>}
 
-      <footer className="p-3 bg-gray-800 border-t border-gray-700 flex gap-2">
+      {!showPad && <footer className="p-3 bg-gray-800 border-t border-gray-700 flex gap-2">
         <button onClick={speech.isListening ? speech.stop : speech.start} disabled={!speech.isSupported} className={`flex-1 py-4 rounded-xl font-bold text-lg flex justify-center items-center gap-2 ${speech.isListening ? 'bg-red-600' : 'bg-emerald-600'} disabled:bg-gray-600`}>
           {speech.isListening ? <><MicOff /> עצור האזנה</> : <><Mic /> התחל האזנה</>}
         </button>
+        <button onClick={() => updatePad({ open: true })} className="relative px-4 rounded-xl bg-sky-700 font-bold flex items-center gap-1" aria-label="לוח כתיבה">
+          <PenLine size={18} /> כתיבה
+          {draft.trim() && <span className="absolute -top-1 -left-1 w-3 h-3 rounded-full bg-amber-400" title="יש בלוח מספרים שטרם נרשמו" />}
+        </button>
         <button onClick={onReview} className="px-4 rounded-xl bg-blue-600 font-bold flex items-center gap-1"><ListChecks size={18} /> סיכום</button>
-      </footer>
+      </footer>}
 
       {picker === 'location' && (
         <PickerSheet
@@ -167,6 +204,26 @@ export default function FieldInspectionScreen({ state, onChange, onReview, onClo
       )}
     </div>
   );
+}
+
+const PAD_PREFERENCE_KEY = 'rapid3.pad';
+
+/** העדפת הלוח (פתוח / גודל) נשמרת במכשיר; כשאין גישה לאחסון - ברירת מחדל */
+function loadPadPreference() {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(PAD_PREFERENCE_KEY) || 'null');
+    return { open: Boolean(saved?.open), size: saved?.size === 'half' ? 'half' : 'large' };
+  } catch {
+    return { open: false, size: 'large' };
+  }
+}
+
+function savePadPreference(preference) {
+  try {
+    window.localStorage.setItem(PAD_PREFERENCE_KEY, JSON.stringify(preference));
+  } catch {
+    // אחסון חסום (גלישה פרטית) - ההעדפה תישמר רק עד סגירת המסך
+  }
 }
 
 /** טופס סוג חדש: הבודק כותב בדיוק איך הסוג יופיע בתסקיר */

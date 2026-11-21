@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import HomeScreen from './screens/HomeScreen';
 import SiteScreen from './screens/SiteScreen';
 import ReviewScreen from './screens/ReviewScreen';
@@ -66,12 +66,45 @@ export default function App() {
     }
   }, [parsed, meta]);
 
-  const handleStateChange = useCallback((nextState) => {
-    setState(nextState);
-    saveState(nextState).catch((err) => console.error('Failed to save state:', err));
+  // שמירה: פריט / מיקום / סוג נשמרים מיד; כתיבה בלוח (שינוי בכל תו) נשמרת בהשהיה קצרה
+  const saveTimer = useRef(null);
+  const unsavedState = useRef(null);
+  const lastState = useRef(null);
+
+  const flushSave = useCallback(() => {
+    clearTimeout(saveTimer.current);
+    const pending = unsavedState.current;
+    unsavedState.current = null;
+    if (pending) saveState(pending).catch((err) => console.error('Failed to save state:', err));
   }, []);
 
+  const handleStateChange = useCallback((nextState) => {
+    const previous = lastState.current;
+    lastState.current = nextState;
+    setState(nextState);
+    unsavedState.current = nextState;
+    const draftOnly = previous && previous.entries === nextState.entries && previous.location === nextState.location
+      && previous.type === nextState.type && previous.pending === nextState.pending && previous.draft !== nextState.draft;
+    clearTimeout(saveTimer.current);
+    if (draftOnly) saveTimer.current = setTimeout(flushSave, 300);
+    else flushSave();
+  }, [flushSave]);
+
+  // יציאה מהאפליקציה / נעילת מסך - שמירת מה שעוד ממתין
+  useEffect(() => {
+    const onHide = () => { if (document.visibilityState === 'hidden') flushSave(); };
+    document.addEventListener('visibilitychange', onHide);
+    window.addEventListener('pagehide', flushSave);
+    return () => {
+      document.removeEventListener('visibilitychange', onHide);
+      window.removeEventListener('pagehide', flushSave);
+    };
+  }, [flushSave]);
+
   const finishSession = useCallback(async () => {
+    clearTimeout(saveTimer.current);
+    unsavedState.current = null;
+    lastState.current = null;
     await clearSaved();
     setParsed(null);
     setMeta(null);
