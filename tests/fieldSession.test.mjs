@@ -36,6 +36,29 @@ assert.equal(matchType('רצועה 4 מטר', catalog).match, 'ambiguous');     
 assert.equal(matchType('שאקל', catalog).match, 'ambiguous');
 assert.equal(matchType('מחגר 3 טון', catalog).match, 'none');
 assert.equal(swlFromColor('רצועה עגולה ירוקה 4 מטר'), 2);
+
+// תיאורים עם צבע (קובץ הריכוז המעודכן): הצבע מבדיל בין תבניות, "חצי" / "וחצי" הם מספרים
+{
+  const colored = buildTypeCatalog({
+    columns: { site: 'אתר', type: 'סוג', description: D, swl: 'עומס' },
+    rows: [
+      ["רצועת הרמה עגולה אורך 4מ' צבע ירוק", 2, 3], ["רצועת הרמה עגולה אורך 4מ' צבע אפור", 4, 6], ["רצועות הרמה עגולות אורך 4מ' צבע אפור", 4, 1],
+      ["רצועת הרמה עגולה אורך 0.5מ' צבע סגול", 1, 2], ["רצועת הרמה עגולה אורך 1.5מ' צבע אדום", 5, 2], ["רצועת הרמה עגולה אורך 6מ' צבע כתום", 25, 2],
+      ["רצועת הרמה עגולה אורך 2מ'", 1, 1], ["רצועת הרמה עגולה אורך 2מ'", 3, 1],
+    ].flatMap(([description, load, n]) => Array.from({ length: n }, () => ({ 'אתר': 'קישון', 'סוג': 'רצועת הרמה', [D]: description, 'עומס': load }))),
+  }, 'קישון');
+  assert.equal(colored.length, 6, 'רבים ויחיד מאוחדים');
+  const hit = (spoken) => matchType(spoken, colored);
+  assert.equal(hit('רצועה עגולה ירוקה 4 מטר').entry.swl, 2);
+  assert.equal(hit('רצועה עגולה אפורה 4 מטר').entry.swl, 4);
+  assert.equal(hit('רצועה עגולה צבע אפור 4 מטר').entry.swl, 4);
+  assert.equal(hit('רצועה עגולה 4 מטר').match, 'ambiguous', 'בלי צבע - שואלים איזה');
+  assert.equal(hit('רצועה עגולה סגולה חצי מטר').entry.description, "רצועת הרמה עגולה אורך 0.5מ' צבע סגול");
+  assert.equal(hit('רצועה עגולה אדומה מטר וחצי').entry.swl, 5);
+  assert.equal(hit('רצועה עגולה כתומה 6 מטר').entry.swl, 25, 'כתום מעל 10 טון - העומס מהקובץ');
+  assert.equal(hit('רצועה עגולה 2 מטר').entry.swl, '', 'עומסים מפוזרים בקובץ - בלי עומס לתבנית');
+  assert.notEqual(hit('רצועה עגולה חומה 4 מטר').match, 'exact', 'צבע שאין בקובץ לא מותאם לצבע אחר');
+}
 assert.equal(swlFromColor('שאקל ירוק'), '');
 
 // ---------- בדיקה בשטח ----------

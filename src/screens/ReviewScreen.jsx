@@ -91,7 +91,7 @@ export default function ReviewScreen({ parsed, state, meta, onChange, onBack, on
         {tab === 'export' && (
           <div className="space-y-3">
             {lists.review.length > 0 && <div className="text-sm text-amber-300 flex items-center gap-2"><AlertTriangle size={16} /> {lists.review.length} פריטים מסומנים לבדיקה - כדאי לעבור עליהם לפני הייצוא.</div>}
-            {rec.types.some((t) => t.swl === '') && <div className="text-sm text-amber-300 flex items-center gap-2"><AlertTriangle size={16} /> יש סוגים ללא עומס עבודה (לשונית "סוגים").</div>}
+            {rec.types.some((t) => t.swl === '') && <div className="text-sm text-amber-300 flex items-center gap-2"><AlertTriangle size={16} /> יש סוגים ללא עומס עבודה בטוח - הם ייכנסו ל-JSON ולתסקיר בלי עומס. השלם בלשונית "סוגים".</div>}
             <ExportButton icon={<FileSpreadsheet />} title="קובץ ריכוז מעודכן" subtitle="מיקום מעודכן לפריטים ישנים, שורות לחדשים, עמודות הבדיקה, גיליונות נבדקו / לא נבדקו / סוגים / מיקומים" done={done.summary}
               onClick={() => run('summary', () => downloadBytes(workbookToBytes(buildUpdatedWorkbook(parsed, state, rec, exportMeta)), `${baseName} - מעודכן ${dateTag}.xlsx`, XLSX_MIME))} />
             <ExportButton icon={<FileSpreadsheet />} title="נבדקו היום בלבד" subtitle="שורה לכל פריט שנבדק, עם הנתונים לתסקיר וסימון ישן / חדש" done={done.inspected}

@@ -24,7 +24,12 @@ const COLUMN_ALIASES = {
   prevResult: ['ממצא בבדיקה', 'ממצא'],
   location: ['קבוצה / מחזיק', 'קבוצה', 'מחזיק', 'מיקום'],
   source: ['מקור'],
+  swl: ['עומס עבודה בטוח (טון)', 'עומס עבודה בטוח'],
+  swlSource: ['מקור העומס'],
 };
+
+/** הערך שנכתב בעמודת "מקור העומס" כשהעומס נקבע בבדיקה בשטח */
+const FIELD_SOURCE = 'בדיקה בשטח';
 
 /** עמודות הבדיקה הנוכחית שהאפליקציה מוסיפה (או מעדכנת אם כבר קיימות) */
 export const RESULT_COLUMNS = {
@@ -192,6 +197,12 @@ function resultCells(entry, result, typeInfo, date) {
   };
 }
 
+/** עומס תקין לכתיבה: מספר חיובי; אחרת null */
+function validSwl(value) {
+  const number = typeof value === 'number' ? value : Number(String(value ?? '').trim() || NaN);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
 /**
  * שורות הריכוז המעודכנות: פריט ישן - מיקום (ואתר) מתעדכנים לאחרון + עמודות הבדיקה; פריט חדש - שורה חדשה.
  */
@@ -211,16 +222,25 @@ export function applyToRows(parsed, state, reconciliation, { date }) {
       if (columns.location) row[columns.location] = entry.location;
       if (columns.site && state.site) row[columns.site] = state.site;
       Object.assign(row, cells);
+      // עומס עבודה בטוח: משלימים רק כשהתא בקובץ ריק - ערך שמקורו בתסקיר לא נדרס
+      const typeSwl = validSwl(typeInfo?.swl);
+      if (columns.swl && typeSwl !== null && validSwl(row[columns.swl]) === null) {
+        row[columns.swl] = typeSwl;
+        if (columns.swlSource) row[columns.swlSource] = FIELD_SOURCE;
+      }
       continue;
     }
 
+    const newSwl = validSwl(typeInfo?.swl);
     rows.push({
       ...(columns.site ? { [columns.site]: state.site } : {}),
       ...(columns.type ? { [columns.type]: typeInfo?.fileType ?? '' } : {}),
       [columns.description]: typeInfo?.reportDescription ?? entry.type,
       [columns.serial]: entry.serial,
       ...(columns.location ? { [columns.location]: entry.location } : {}),
-      ...(columns.source ? { [columns.source]: 'בדיקה בשטח' } : {}),
+      ...(columns.source ? { [columns.source]: FIELD_SOURCE } : {}),
+      ...(columns.swl && newSwl !== null ? { [columns.swl]: newSwl } : {}),
+      ...(columns.swl && columns.swlSource && newSwl !== null ? { [columns.swlSource]: FIELD_SOURCE } : {}),
       ...cells,
     });
   }
@@ -275,6 +295,7 @@ export function buildNotInspectedRows(parsed, reconciliation) {
 /**
  * JSON לתסקירים: קבוצה לכל מיקום × סוג = תסקיר; שורות לפי תיאור + עומס עם רשימת מספרים;
  * ליקויים (כולל הערות על פריטים תקינים) עם מספר הפריט.
+ * עומס עבודה בטוח: lines[].swl בטון (מספר), או null כשלא נקבע עומס לסוג; missingSwl מפרט את הסוגים החסרים.
  */
 export function buildReportJson(state, reconciliation, { clientName, site, date }) {
   const types = typeInfoMap(reconciliation);
@@ -288,7 +309,7 @@ export function buildReportJson(state, reconciliation, { clientName, site, date 
     }
     const group = groups.get(key);
     const description = typeInfo?.reportDescription ?? entry.type;
-    const swl = typeInfo?.swl ?? '';
+    const swl = validSwl(typeInfo?.swl);
     const lineKey = `${description}||${swl}`;
     if (!group.lines.has(lineKey)) group.lines.set(lineKey, { description, swl, serials: [], failedSerials: [], newSerials: [] });
     const line = group.lines.get(lineKey);
@@ -303,6 +324,8 @@ export function buildReportJson(state, reconciliation, { clientName, site, date 
     site,
     date,
     counts: reconciliation.counts,
+    swlUnit: 'ton',
+    missingSwl: reconciliation.types.filter((t) => validSwl(t.swl) === null).map((t) => ({ type: t.reportDescription, spokenType: t.name, quantity: t.count })),
     groups: [...groups.values()].map((g) => ({
       ...g,
       lines: [...g.lines.values()].map((l) => ({ ...l, quantity: l.serials.length + l.failedSerials.length })),

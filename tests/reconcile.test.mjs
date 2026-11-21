@@ -153,6 +153,59 @@ assert.deepEqual(storeGroup.lines[0].failedSerials, ['7/2/1046']);
 assert.equal(json.moved.length, 3);   // 96-4/2001, 10498 (שאקל), 5555/1 (מאתר אחר)
 assert.equal(json.groups.find((g) => g.location === 'ארובה').defects[0].status, 'ok');
 
+assert.equal(storeGroup.lines[0].swl, 2.5, 'העומס שנקבע לסוג נכנס ל-JSON');
+assert.equal(json.swlUnit, 'ton');
+assert.equal(json.groups.find((g) => g.location === 'ארובה').lines[0].swl, null, 'סוג ללא עומס -> null');
+assert.deepEqual(json.missingSwl.map((t) => t.spokenType), ['שאקל 7/8']);
+
+// ---------- עמודת "עומס עבודה בטוח (טון)" בקובץ ----------
+{
+  const header2 = [...header, 'עומס עבודה בטוח (טון)', 'מקור העומס'];
+  const withLoad = (row, load, source) => [...row, load, source];
+  const data2 = [
+    header2,
+    withLoad(['קישון', 1, 'שאקל', 'שאקל הרמה במבנה Ω גודל "3/4', 'A1', '', 'תקין', 'מחסן כלים', 'תסקיר', ''], 4.75, 'תסקיר'),
+    withLoad(['קישון', 1, 'שאקל', 'שאקל הרמה במבנה Ω גודל "3/4', 'A2', '', 'תקין', 'מחסן כלים', 'תסקיר', ''], 4.75, 'תסקיר'),
+    withLoad(['קישון', 1, 'שאקל', 'שאקל הרמה במבנה Ω גודל "3/4', 'A3', '', 'פסול', 'מחסן כלים', 'תסקיר', ''], '', 'לא נרשם בתסקיר'),
+    withLoad(['קישון', 1, 'שאקל', 'שאקל הרמה במבנה Ω גודל "3/4', 'A4', '', 'תקין', 'מחסן כלים', 'תסקיר', ''], 3.25, 'תסקיר – לאמת'),
+    withLoad(['קישון', 2, 'רצועת הרמה', "רצועת הרמה עגולה אורך 6מ' צבע כתום", 'B1', '', 'תקין', 'מחסן כלים', 'תסקיר', ''], 25, 'תסקיר'),
+    withLoad(['קישון', 2, 'רצועת הרמה', "רצועת הרמה עגולה אורך 2מ'", 'C1', '', 'תקין', 'מחסן כלים', 'תסקיר', ''], 1, 'תסקיר'),
+    withLoad(['קישון', 2, 'רצועת הרמה', "רצועת הרמה עגולה אורך 2מ'", 'C2', '', 'תקין', 'מחסן כלים', 'תסקיר', ''], 2, 'תסקיר'),
+  ];
+  const wb2 = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb2, XLSX.utils.aoa_to_sheet(data2), 'מרכז מתקנים ואביזרים');
+  const parsed2 = parseSummaryWorkbook(XLSX.write(wb2, { type: 'buffer', bookType: 'xlsx' }));
+  assert.equal(parsed2.columns.swl, 'עומס עבודה בטוח (טון)');
+  assert.equal(parsed2.columns.swlSource, 'מקור העומס');
+  assert.equal(parsed2.columns.source, 'מקור');
+  const catalog2 = buildTypeCatalog(parsed2, 'קישון');
+  assert.equal(catalog2.find((c) => /3\/4/.test(c.description)).swl, 4.75, 'העומס הנפוץ בקובץ');
+  assert.equal(catalog2.find((c) => /כתום/.test(c.description)).swl, 25, 'כתום מעל 10 טון - מהקובץ, לא מהצבע');
+  assert.equal(catalog2.find((c) => /2מ/.test(c.description)).swl, '', 'עומסים מפוזרים - בלי עומס לתבנית');
+
+  let s2 = createFieldState({ site: 'קישון', knownLocations: ['מחסן כלים'], catalog: catalog2 });
+  const say2 = (t) => { s2 = applyTranscript(s2, t, 0.9).state; };
+  say2('מיקום מחסן כלים');
+  say2('סוג שאקל 3/4');
+  ['A1', 'A3', 'A4', 'N1'].forEach(say2);
+  say2('סוג רצועה עגולה כתומה 6 מטר');
+  say2('B1');
+  const rec3 = reconcile(parsed2, s2);
+  const meta2 = { clientName: 'x', site: 'קישון', date: '21/11/2026' };
+  const rows2 = XLSX.utils.sheet_to_json(buildUpdatedWorkbook(parsed2, s2, rec3, meta2).Sheets['מרכז מתקנים ואביזרים'], { defval: '' });
+  const row2 = (serial) => rows2.find((x) => x["מס' סידורי / פנימי"] === serial);
+  assert.equal(row2('N1')['עומס עבודה בטוח (טון)'], 4.75, 'פריט חדש מקבל את עומס הסוג');
+  assert.equal(row2('N1')['מקור העומס'], 'בדיקה בשטח');
+  assert.equal(row2('A3')['עומס עבודה בטוח (טון)'], 4.75, 'תא ריק מושלם');
+  assert.equal(row2('A3')['מקור העומס'], 'בדיקה בשטח');
+  assert.equal(row2('A4')['עומס עבודה בטוח (טון)'], 3.25, 'ערך מהתסקיר לא נדרס');
+  assert.equal(row2('A4')['מקור העומס'], 'תסקיר – לאמת');
+  assert.equal(row2('A2')['עומס עבודה בטוח (טון)'], 4.75);
+  const json2 = buildReportJson(s2, rec3, meta2);
+  assert.deepEqual(json2.groups.map((g) => g.lines[0].swl).sort((a, b) => a - b), [4.75, 25]);
+  assert.deepEqual(json2.missingSwl, []);
+}
+
 // ---------- הקובץ האמיתי (אם קיים) ----------
 const realPath = process.argv[2] || '/mnt/user-data/uploads/חברת החשמל/ריכוז מתקנים ואביזרים - חברת החשמל - מעודכן.xlsx';
 if (existsSync(realPath)) {
